@@ -1,7 +1,8 @@
 # herdr-content-picker
 
-A [herdr](https://herdr.dev) plugin that fuzzy-searches the visible terminal
-content of every open agent pane and jumps straight to the match.
+A [herdr](https://herdr.dev) plugin that searches the terminal content of every
+open agent pane, plus your past pi and Claude Code sessions, and jumps straight
+to the match.
 
 Herdr's built-in Goto picker (`prefix+g`) searches names, tabs, and paths.
 This plugin searches the actual terminal output: one row per agent, ranked by
@@ -22,14 +23,16 @@ STATUS      HITS  AGENT                                  WORKSPACE          KIND
   order, case-insensitively. Empty query lists all open agents.
 - **Preview**: matching lines with 2 lines of surrounding context, query
   words highlighted, gaps marked.
-- **Scope**: agents currently open in herdr (not the one you're in). Only
-  looks at what's currently on screen — herdr doesn't retain scrollback
-  history for most agent integrations, so older messages that have scrolled
-  away aren't searchable.
+- **Live agents**: the last 500 lines of every open agent pane (not the one
+  you're in). Enter focuses the agent.
+- **Past sessions**: pi (`~/.pi/agent/sessions`) and Claude Code
+  (`~/.claude/projects`) transcripts, searched with ripgrep and listed below
+  live agents (top 50 by hits). Enter resumes the session in a new tab.
+  Override the locations with `PI_SESSIONS` / `CLAUDE_SESSIONS`.
 
 ## Requirements
 
-`jq`, `fzf`, and a POSIX `awk`/`sh` on your `PATH`.
+`jq`, `fzf`, `rg` (ripgrep), and a POSIX `awk`/`sh` on your `PATH`.
 
 ## Install
 
