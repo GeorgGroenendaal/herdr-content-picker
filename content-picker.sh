@@ -44,6 +44,13 @@ snapshot() {
     | [.pane_id, .tab_id, .workspace_id, .agent, .agent_status,
        ((.display_agent // .terminal_title_stripped // .agent) | gsub("\""; "")),
        (.foreground_cwd // .cwd), (.agent_session.value // "")] | @tsv' > "$D/agents"
+  ws=$("$H" workspace list)
+  while IFS="$TAB" read -r pane tab wsid kind status label cwd session; do
+    wsl=$(printf '%s' "$ws" | jq -r --arg id "$wsid" '.result.workspaces[] | select(.workspace_id == $id) | .label')
+    m=0; [ -f "$session" ] && m=$(mtime "$session")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m"
+  done < "$D/agents" > "$D/meta"
+  touch "$D/meta_ready"  # enough to list agents; content search waits for "ready"
   # Reads cost ~6ms per line, so cap lines and read all panes in parallel.
   cut -f1 "$D/agents" | {
     while read -r pane; do
@@ -51,19 +58,13 @@ snapshot() {
     done
     wait
   }
-  ws=$("$H" workspace list)
-  while IFS="$TAB" read -r pane tab wsid kind status label cwd session; do
-    wsl=$(printf '%s' "$ws" | jq -r --arg id "$wsid" '.result.workspaces[] | select(.workspace_id == $id) | .label')
-    m=0; [ -f "$session" ] && m=$(mtime "$session")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m"
-  done < "$D/agents" > "$D/meta"
 }
 
 matches_in() { awk -v q="$1" "$AWK_LIB"' matches($0) { c++ } END { print c + 0 }' "$2"; }
 
 live_rows() {
   while IFS="$TAB" read -r pane tab kind status label wsl m _; do
-    hits=$(matches_in "$1" "$D/$pane")
+    hits=0; [ -n "$1" ] && hits=$(matches_in "$1" "$D/$pane")
     [ -n "$1" ] && [ "$hits" -eq 0 ] && continue
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$hits" "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m"
   done < "$D/meta" | sort -t "$TAB" -k1,1nr |
@@ -114,7 +115,10 @@ $(grep "^$1$TAB" "$D/meta")
 EOF
   cwd=$(grep "^$1$TAB" "$D/agents" | cut -f7)
   printf '\033[1m%s\033[0m  %s · %s · %s\n%s\n\n' "$label" "$kind" "$status" "$wsl" "$cwd"
-  if [ -z "$2" ]; then tail -40 "$D/$1"; return; fi
+  if [ -z "$2" ]; then
+    if [ -f "$D/ready" ]; then tail -40 "$D/$1"; else "$H" pane read "$1" --source visible; fi
+    return
+  fi
   # Each hit with 2 lines of context, gaps marked, query words highlighted.
   awk -v q="$2" "$AWK_LIB"'
     { line[NR] = $0; hit[NR] = matches($0) }
@@ -151,11 +155,15 @@ open_session() {
 
 # fzf kills a running reload when you type, so the snapshot runs outside fzf
 # and every reload/preview waits for it to finish.
-wait_ready() { while [ ! -f "$D/ready" ]; do sleep 0.1; done; }
+# An empty query only needs the agent list, not the slow pane reads.
+wait_ready() {
+  f=ready; [ -z "$1" ] && f=meta_ready
+  while [ ! -f "$D/$f" ]; do sleep 0.05; done
+}
 
 case "$1" in
-  --rows) D="$2"; wait_ready; live_rows "$3"; history_rows "$3"; exit ;;
-  --preview) D="$2"; wait_ready
+  --rows) D="$2"; wait_ready "$3"; live_rows "$3"; history_rows "$3"; exit ;;
+  --preview) D="$2"; wait_ready "$6"
     if [ "$3" = live ]; then preview_live "$4" "$6"; else preview_history "$4" "$6" "$3" "$5"; fi; exit ;;
 esac
 
