@@ -8,6 +8,7 @@ TAB="$(printf '\t')"
 PI_SESSIONS="${PI_SESSIONS:-$HOME/.pi/agent/sessions}"
 CLAUDE_SESSIONS="${CLAUDE_SESSIONS:-$HOME/.claude/projects}"
 HISTORY_LIMIT=50
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-content-picker"
 set -f  # query words like * must stay literal
 
 for dep in jq fzf awk rg; do
@@ -50,24 +51,43 @@ snapshot() {
     m=0; [ -f "$session" ] && m=$(mtime "$session")
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m"
   done < "$D/agents" > "$D/meta"
-  touch "$D/meta_ready"  # enough to list agents; content search waits for "ready"
-  # Reads cost ~6ms per line, so cap lines and read all panes in parallel.
+  touch "$D/meta_ready"  # enough to list agents
+  # Fresh reads cost ~6ms per line (~3s), so search the previous snapshot from
+  # the cache right away and swap in fresh content as each read finishes.
+  mkdir -p "$CACHE"
+  cached=1
+  while read -r pane _; do
+    if [ -f "$CACHE/$pane" ]; then cp "$CACHE/$pane" "$D/$pane"; else cached=0; fi
+  done < "$D/agents"
+  [ "$cached" = 1 ] && touch "$D/ready"
   cut -f1 "$D/agents" | {
     while read -r pane; do
-      "$H" pane read "$pane" --source recent-unwrapped --lines 500 > "$D/$pane" &
+      { "$H" pane read "$pane" --source recent-unwrapped --lines 500 > "$D/$pane.new" &&
+        cp "$D/$pane.new" "$CACHE/$pane" && mv "$D/$pane.new" "$D/$pane"; } &
     done
     wait
   }
 }
 
-matches_in() { awk -v q="$1" "$AWK_LIB"' matches($0) { c++ } END { print c + 0 }' "$2"; }
+# Atuin-style order: tight matches (exact phrase) first, then most recent,
+# then hit count. Input columns: 1 hits, 8 mtime, 9 exact.
+rank() { sort -t "$TAB" -k9,9nr -k8,8nr -k1,1nr; }
+
+# Prints "<lines with every word> <1 if any line has the exact phrase, else 0>".
+matches_in() {
+  awk -v q="$1" "$AWK_LIB"'
+    BEGIN { phrase = tolower(q); gsub(/[[:space:]]+/, " ", phrase); sub(/^ /, "", phrase); sub(/ $/, "", phrase) }
+    matches($0) { c++; if (index(tolower($0), phrase)) e = 1 }
+    END { print c + 0, e + 0 }' "$2"
+}
 
 live_rows() {
+  q=$1
   while IFS="$TAB" read -r pane tab kind status label wsl m _; do
-    hits=0; [ -n "$1" ] && hits=$(matches_in "$1" "$D/$pane")
-    [ -n "$1" ] && [ "$hits" -eq 0 ] && continue
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$hits" "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m"
-  done < "$D/meta" | sort -t "$TAB" -k1,1nr |
+    set -- "$q" $([ -n "$q" ] && matches_in "$q" "$D/$pane" || echo 0 0)
+    [ -n "$q" ] && [ "$2" -eq 0 ] && continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$pane" "$tab" "$kind" "$status" "$label" "$wsl" "$m" "$3"
+  done < "$D/meta" | rank |
   awk -F "$TAB" -v now="$(date +%s)" "$ROW_AWK"'
     BEGIN { col["blocked"] = 31; col["working"] = 33; col["idle"] = 32; col["done"] = 32 }
     { row("live", $2, $3, $5, ($5 in col) ? col[$5] : 90, $1, $6, $7, $4, $8) }'
@@ -87,9 +107,23 @@ history_rows() {
   # shellcheck disable=SC2086
   rg -P -c --no-messages -g '*.jsonl' "$(session_pattern "$1")" $dirs |
     awk -F: 'NR == FNR { live[$0]; next } { n = $NF; sub(/:[0-9]+$/, ""); if (!($0 in live)) print n "\t" $0 }' \
-      "$D/live_sessions" - |
-    sort -t "$TAB" -k1,1nr | head -n "$HISTORY_LIMIT" > "$D/hist.$$"
-  [ -s "$D/hist.$$" ] || { rm -f "$D/hist.$$"; return 0; }
+      "$D/live_sessions" - > "$D/all.$$"
+  [ -s "$D/all.$$" ] || { rm -f "$D/all.$$"; return 0; }
+  all=$(cut -f2 "$D/all.$$")
+  phrase=$(echo $1)
+  # Add mtime and exact-phrase columns for every match, rank, then keep the top.
+  # shellcheck disable=SC2086
+  {
+    stat -f '%N:M%m' $all 2>/dev/null || stat -c '%n:M%Y' $all
+    case "$phrase" in
+      *" "*) rg --no-messages -i -F -l -- "$phrase" $all | sed 's/$/:E/' ;;
+      *) printf '%s:E\n' $all ;;  # one word: every match is exact
+    esac
+  } | awk -F "$TAB" 'FNR == NR { i = index($0, ":"); f = substr($0, 1, i - 1); v = substr($0, i + 1)
+                                 if (v == "E") ex[f] = 1; else mt[f] = substr(v, 2); next }
+      { print $1 "\t" $2 "\t\t\t\t\t\t" mt[$2] "\t" ($2 in ex) }' - "$D/all.$$" |
+    rank | head -n "$HISTORY_LIMIT" > "$D/hist.$$"
+  rm -f "$D/all.$$"
   files=$(cut -f2 "$D/hist.$$")
   # One rg pass each for titles, first prompts and cwds across the top files only.
   # shellcheck disable=SC2086
@@ -97,15 +131,14 @@ history_rows() {
     rg --no-messages -H -o -r 'T$1$2' '"type":"session_info".*"name":"([^"]{1,80})|"aiTitle":"([^"]{1,80})' $files
     rg --no-messages -H -m1 -o -r 'P$1' '"role":"user","content":(?:\[\{"type":"text","text":)?"([^"]{1,80})' $files
     rg --no-messages -H -m1 -o -r 'C$1' '"cwd":"([^"]*)"' $files
-    stat -f '%N:M%m' $files 2>/dev/null || stat -c '%n:M%Y' $files
   } > "$D/info.$$"
   awk -F "$TAB" -v now="$(date +%s)" -v pi="$PI_SESSIONS" "$ROW_AWK"'
     FNR == NR { i = index($0, ":"); f = substr($0, 1, i - 1); k = substr($0, i + 1, 1); v = substr($0, i + 2)
-      if (k == "T") title[f] = v; else if (k == "P") prompt[f] = v; else if (k == "C") cwd[f] = v; else mt[f] = v; next }
+      if (k == "T") title[f] = v; else if (k == "P") prompt[f] = v; else cwd[f] = v; next }
     { f = $2; kind = index(f, pi) == 1 ? "pi" : "claude"
       t = (f in title) ? title[f] : (f in prompt) ? prompt[f] : "(untitled)"
       gsub(/\\n/, " ", t); p = cwd[f]; sub(/.*\//, "", p)
-      row(kind, f, cwd[f], "history", 90, $1, t, p, kind, mt[f]) }' "$D/info.$$" "$D/hist.$$"
+      row(kind, f, cwd[f], "history", 90, $1, t, p, kind, $8) }' "$D/info.$$" "$D/hist.$$"
   rm -f "$D/hist.$$" "$D/info.$$"
 }
 

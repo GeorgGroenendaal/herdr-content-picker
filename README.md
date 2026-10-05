@@ -18,13 +18,17 @@ STATUS      HITS  AGENT                                  WORKSPACE          KIND
 
 - **Rows**: colored status dot (blocked/working/idle/done), hit count, agent
   name, workspace, agent type, and time since the agent last wrote its
-  session file. Sorted by hit count, most first.
+  session file.
+- **Ordering** (like atuin): rows containing your exact phrase first, then most
+  recently active, then hit count. Live agents always rank above past sessions.
 - **Matching**: a line matches when it contains every word you typed, in any
   order, case-insensitively. Empty query lists all open agents.
 - **Preview**: matching lines with 2 lines of surrounding context, query
   words highlighted, gaps marked.
 - **Live agents**: the last 500 lines of every open agent pane (not the one
-  you're in). Enter focuses the agent.
+  you're in). Enter focuses the agent. The previous snapshot is cached in
+  `~/.cache/herdr-content-picker`, so search is instant on open and refreshes
+  in the background.
 - **Past sessions**: pi (`~/.pi/agent/sessions`) and Claude Code
   (`~/.claude/projects`) transcripts, searched with ripgrep and listed below
   live agents (top 50 by hits). Enter resumes the session in a new tab.
