@@ -28,12 +28,17 @@ AWK_LIB='
       out = out substr(s, 1, best - 1) "\033[1;30;43m" substr(s, best, bl) "\033[0m"; s = substr(s, best + bl) } }
 '
 # Row layout: type, target, extra (hidden) | status, hits, title, place, kind, age
+# Title and place columns share the popup width (TW/WW, set before fzf starts).
 ROW_AWK='
   function age(t) { if (!t) return "-"; s = now - t
     return s < 60 ? s "s" : s < 3600 ? int(s/60) "m" : s < 86400 ? int(s/3600) "h" : int(s/86400) "d" }
-  function row(type, target, extra, status, color, hits, title, place, kind, t) {
-    printf "%s\t%s\t%s\t\033[%sm● %-8s\033[0m %5s  %-38.38s %-18.18s %-7s %5s\n",
-      type, target, extra, color, status, (hits ? hits : "·"), title, place, kind, age(t) }
+  # ASCII ellipses: macOS awk pads by bytes, so multibyte ones break alignment.
+  function cut(s, w) { return length(s) > w ? substr(s, 1, w - 3) "..." : s }
+  function lcut(s, w) { return length(s) > w ? "..." substr(s, length(s) - w + 4) : s }
+  function row(type, target, extra, status, color, hits, title, place, kind, t,   tw, ww) {
+    tw = ENVIRON["TW"] + 0; ww = ENVIRON["WW"] + 0; if (!tw) tw = 38; if (!ww) ww = 18
+    printf "%s\t%s\t%s\t\033[%sm● %-8s\033[0m  \033[1m%5s\033[0m  %-" tw "s  \033[36m%-" ww "s\033[0m  \033[90m%-7s  %6s\033[0m\n",
+      type, target, extra, color, status, (hits ? hits : "·"), cut(title, tw), lcut(place, ww), kind, age(t) }
 '
 
 mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
@@ -128,16 +133,16 @@ history_rows() {
   # One rg pass each for titles, first prompts and cwds across the top files only.
   # shellcheck disable=SC2086
   {
-    rg --no-messages -H -o -r 'T$1$2' '"type":"session_info".*"name":"([^"]{1,80})|"aiTitle":"([^"]{1,80})' $files
-    rg --no-messages -H -m1 -o -r 'P$1' '"role":"user","content":(?:\[\{"type":"text","text":)?"([^"]{1,80})' $files
+    rg --no-messages -H -o -r 'T$1$2' '"type":"session_info".*"name":"([^"]{1,200})|"aiTitle":"([^"]{1,200})' $files
+    rg --no-messages -H -m1 -o -r 'P$1' '"role":"user","content":(?:\[\{"type":"text","text":)?"([^"]{1,200})' $files
     rg --no-messages -H -m1 -o -r 'C$1' '"cwd":"([^"]*)"' $files
   } > "$D/info.$$"
-  awk -F "$TAB" -v now="$(date +%s)" -v pi="$PI_SESSIONS" "$ROW_AWK"'
+  awk -F "$TAB" -v now="$(date +%s)" -v pi="$PI_SESSIONS" -v home="$HOME" "$ROW_AWK"'
     FNR == NR { i = index($0, ":"); f = substr($0, 1, i - 1); k = substr($0, i + 1, 1); v = substr($0, i + 2)
       if (k == "T") title[f] = v; else if (k == "P") prompt[f] = v; else cwd[f] = v; next }
     { f = $2; kind = index(f, pi) == 1 ? "pi" : "claude"
       t = (f in title) ? title[f] : (f in prompt) ? prompt[f] : "(untitled)"
-      gsub(/\\n/, " ", t); p = cwd[f]; sub(/.*\//, "", p)
+      gsub(/\\n/, " ", t); p = cwd[f]; if (index(p, home) == 1) p = "~" substr(p, length(home) + 1)
       row(kind, f, cwd[f], "history", 90, $1, t, p, kind, $8) }' "$D/info.$$" "$D/hist.$$"
   rm -f "$D/hist.$$" "$D/info.$$"
 }
@@ -204,7 +209,12 @@ D=$(mktemp -d)
 ( snapshot; touch "$D/ready" ) &
 SNAP=$!
 trap 'kill $SNAP 2>/dev/null; rm -rf "$D"' EXIT
-header=$(printf '%-10s %5s  %-38s %-18s %-7s %5s' STATUS HITS AGENT WHERE KIND ACTIVE)
+# Fixed columns + separators take 41 cells; title gets ~70% of the rest.
+cols=$(tput cols 2>/dev/null || echo 120)
+rest=$((cols - 41)); TW=$((rest * 70 / 100)); WW=$((rest - TW))
+[ "$TW" -lt 20 ] && TW=20; [ "$WW" -lt 10 ] && WW=10
+export TW WW
+header=$(printf '%-10s  %5s  %-*s  %-*s  %-7s  %6s' STATUS HITS "$TW" AGENT "$WW" WHERE KIND ACTIVE)
 sel=$(: | fzf --ansi --disabled --delimiter="$TAB" --with-nth=4.. --reverse \
   --prompt='search> ' --header="$header" --header-first \
   --bind "start:reload:'$SELF' --rows '$D' ''" \
