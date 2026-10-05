@@ -20,9 +20,15 @@ snapshot() {
     | [.pane_id, .tab_id, .workspace_id, .agent, .agent_status,
        ((.display_agent // .terminal_title_stripped // .agent) | gsub("\""; "")),
        (.foreground_cwd // .cwd), (.agent_session.value // "")] | @tsv' > "$D/agents"
+  # Reads cost ~6ms per line, so cap lines and read all panes in parallel.
+  cut -f1 "$D/agents" | {
+    while read -r pane; do
+      "$H" pane read "$pane" --source recent-unwrapped --lines 500 > "$D/$pane" &
+    done
+    wait
+  }
   ws=$("$H" workspace list)
   while IFS="$TAB" read -r pane tab wsid kind status label cwd session; do
-    "$H" pane read "$pane" --source recent-unwrapped --lines 2000 > "$D/$pane"
     wsl=$(printf '%s' "$ws" | jq -r --arg id "$wsid" '.result.workspaces[] | select(.workspace_id == $id) | .label')
     mtime=0; [ -f "$session" ] && mtime=$(stat -f %m "$session" 2>/dev/null || stat -c %Y "$session" 2>/dev/null)
     mtime=${mtime:-0}
@@ -70,15 +76,16 @@ EOF
 }
 
 case "$1" in
+  --load) D="$2"; snapshot; rows ""; exit ;;
   --rows) D="$2"; rows "$3"; exit ;;
   --preview) D="$2"; preview "$3" "$4"; exit ;;
 esac
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-snapshot
 header=$(printf '%-10s %5s  %-38s %-18s %-7s %5s' STATUS HITS AGENT WORKSPACE KIND ACTIVE)
-sel=$(rows "" | fzf --ansi --disabled --delimiter="$TAB" --with-nth=3.. --reverse \
+sel=$(: | fzf --ansi --disabled --delimiter="$TAB" --with-nth=3.. --reverse \
   --prompt='search> ' --header="$header" --header-first \
+  --bind "start:reload:'$SELF' --load '$D'" \
   --bind "change:reload:'$SELF' --rows '$D' {q}" \
   --preview "'$SELF' --preview '$D' {1} {q}" --preview-window=down,60%,wrap) || exit 0
 
