@@ -75,17 +75,23 @@ EOF
         printf "\033[90m%4d│\033[0m %s\n", j, hl(line[j]); last = j } }' "$D/$1"
 }
 
+# fzf kills a running reload when you type, so the snapshot runs outside fzf
+# and every reload/preview waits for it to finish.
+wait_ready() { while [ ! -f "$D/ready" ]; do sleep 0.1; done; }
+
 case "$1" in
-  --load) D="$2"; snapshot; rows ""; exit ;;
-  --rows) D="$2"; rows "$3"; exit ;;
-  --preview) D="$2"; preview "$3" "$4"; exit ;;
+  --rows) D="$2"; wait_ready; rows "$3"; exit ;;
+  --preview) D="$2"; wait_ready; preview "$3" "$4"; exit ;;
 esac
 
-D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+D=$(mktemp -d)
+( snapshot; touch "$D/ready" ) &
+SNAP=$!
+trap 'kill $SNAP 2>/dev/null; rm -rf "$D"' EXIT
 header=$(printf '%-10s %5s  %-38s %-18s %-7s %5s' STATUS HITS AGENT WORKSPACE KIND ACTIVE)
 sel=$(: | fzf --ansi --disabled --delimiter="$TAB" --with-nth=3.. --reverse \
   --prompt='search> ' --header="$header" --header-first \
-  --bind "start:reload:'$SELF' --load '$D'" \
+  --bind "start:reload:'$SELF' --rows '$D' ''" \
   --bind "change:reload:'$SELF' --rows '$D' {q}" \
   --preview "'$SELF' --preview '$D' {1} {q}" --preview-window=down,60%,wrap) || exit 0
 
