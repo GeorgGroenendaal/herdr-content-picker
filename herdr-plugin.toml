@@ -1,0 +1,22 @@
+id = "georggroenendaal.content-picker"
+name = "Content Picker"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Fuzzy-search terminal content across open herdr agents and jump to the match"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "picker"
+title = "Content Picker"
+platforms = ["linux", "macos"]
+placement = "popup"
+width = "85%"
+height = "80%"
+command = ["sh", "content-picker.sh"]
+
+[[actions]]
+id = "search"
+title = "Search agent content"
+contexts = ["global"]
+platforms = ["linux", "macos"]
+command = ["sh", "open-picker.sh"]
